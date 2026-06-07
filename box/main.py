@@ -29,7 +29,7 @@ CAM_W        = int(os.environ.get("ONGOR_CAM_W", "640"))
 CAM_H        = int(os.environ.get("ONGOR_CAM_H", "480"))
 CAM_FPS      = int(os.environ.get("ONGOR_CAM_FPS", "30"))
 PREDICT_FPS  = int(os.environ.get("ONGOR_FPS", "6"))
-JPEG_QUALITY = int(os.environ.get("ONGOR_JPEG", "70"))
+JPEG_QUALITY = int(os.environ.get("ONGOR_JPEG", "90"))
 REQ_TIMEOUT  = float(os.environ.get("ONGOR_TIMEOUT", "4.0"))
 CAM_FAIL_MAX = 5
 
@@ -139,6 +139,9 @@ def _list_devices():
 def _open_try(src, backend=None):
     try:
         cam = cv2.VideoCapture(src, backend) if backend is not None else cv2.VideoCapture(src)
+        cam.set(cv2.CAP_PROP_FRAME_WIDTH, CAM_W)
+        cam.set(cv2.CAP_PROP_FRAME_HEIGHT, CAM_H)
+        cam.set(cv2.CAP_PROP_FPS, CAM_FPS)
         if cam.isOpened() and cam.read()[0]: return cam
         cam.release()
     except Exception: pass
@@ -147,9 +150,9 @@ def _open_try(src, backend=None):
 def _pipes(dev):
     base = f"v4l2src device={dev}"
     return [
-        ("nv12",  f"{base} ! video/x-raw,format=NV12,width={CAM_W},height={CAM_H} ! videoconvert ! appsink drop=true max-buffers=2"),
-        ("mjpeg", f"{base} ! image/jpeg,width={CAM_W},height={CAM_H} ! jpegdec ! videoconvert ! appsink drop=true max-buffers=2"),
-        ("raw",   f"{base} ! video/x-raw,width={CAM_W},height={CAM_H} ! videoconvert ! appsink drop=true max-buffers=2"),
+        ("nv12",  f"{base} ! video/x-raw,format=NV12,width={CAM_W},height={CAM_H},framerate={CAM_FPS}/1 ! videoconvert ! appsink drop=true max-buffers=2"),
+        ("mjpeg", f"{base} ! image/jpeg,width={CAM_W},height={CAM_H},framerate={CAM_FPS}/1 ! jpegdec ! videoconvert ! appsink drop=true max-buffers=2"),
+        ("raw",   f"{base} ! video/x-raw,width={CAM_W},height={CAM_H},framerate={CAM_FPS}/1 ! videoconvert ! appsink drop=true max-buffers=2"),
         ("plain", f"{base} ! videoconvert ! appsink drop=true max-buffers=2"),
     ]
 

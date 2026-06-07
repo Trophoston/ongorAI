@@ -40,7 +40,11 @@
 1. รัน **Ong-Or Pose API** ให้ได้ก่อน (ดู [`../INSTALL_ARDUINO_UNO_Q.md`](../INSTALL_ARDUINO_UNO_Q.md))
 2. นำ `main.py` + `ongor_box.ino` เข้าโปรเจกต์ Arduino App Lab แล้ว Run
 3. ค่าปรับได้ผ่าน env (ตัวอย่าง): `ONGOR_API`, `ONGOR_CAM`, `ONGOR_FPS`,
-   `ONGOR_MEMORIZE` (วินาทีโชว์ท่า), `ONGOR_STEP_TIMEOUT` (วินาทีต่อท่า), `ONGOR_MAX_LEN`
+   `ONGOR_JPEG=90`, `ONGOR_MEMORIZE` (วินาทีโชว์ท่า), `ONGOR_STEP_TIMEOUT`
+   (วินาทีต่อท่า), `ONGOR_MAX_LEN`
+
+ถ้า AI ซ้าย/ขวาสลับ ให้ตั้งฝั่ง API เป็น `ONGOR_POSE_FLIP=1`.
+ถ้า Test AI เห็น label ถูกแต่ `confirmed` ไม่ขึ้น ให้ลอง `ONGOR_POSE_CONF=0.75`.
 
 > ปกติ `main.py` หา API เองผ่าน docker gateway/localhost ถ้าไม่เจอให้กำหนด
 > `ONGOR_API=http://<ip-host>:8000` ตรง ๆ

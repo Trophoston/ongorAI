@@ -19,6 +19,7 @@ Arduino Uno Q) ต้องการแค่ tflite-runtime + opencv + numpy
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -109,7 +110,7 @@ class MediaPipeExtractor:
         self,
         model_complexity: int = 1,            # คงไว้เพื่อความเข้ากันได้ (ตอนนี้ใช้รุ่น full เสมอ)
         min_detection_confidence: float = 0.6,  # presence ต่ำกว่านี้ = ถือว่าไม่เจอคน
-        min_tracking_confidence: float = 0.5,  # คงไว้เพื่อความเข้ากันได้ (ไม่มี tracking ในโหมดนี้)
+        min_tracking_confidence: float = 0.5,  # คงไว้เพื่อความเข้ากันได้ (ROI tracking ใช้ภายใน)
         static_image_mode: bool = False,       # คงไว้เพื่อความเข้ากันได้
         model_path: Path | str | None = None,
     ) -> None:
@@ -134,8 +135,13 @@ class MediaPipeExtractor:
         if self._out_landmarks is None:
             raise RuntimeError("โมเดลไม่มี output landmark (shape ...,195) — ไฟล์โมเดลผิดรุ่น?")
 
-        self.presence_threshold = float(min_detection_confidence)
-        self.roi_margin = 0.35    # ขยายกรอบรอบตัวคนกี่ % ก่อน crop รอบสอง
+        self.presence_threshold = float(
+            os.getenv("ONGOR_POSE_PRESENCE", str(min_detection_confidence))
+        )
+        self.roi_margin = float(os.getenv("ONGOR_POSE_ROI_MARGIN", "0.85"))
+        self.search_when_lost = os.getenv("ONGOR_POSE_SEARCH", "1").lower() not in (
+            "0", "false", "no", "off"
+        )
         self._roi: tuple[int, int, int, int] | None = None  # กรอบคนเฟรมก่อน (ROI tracking)
         # default False เพื่อให้ตรงกับ dataset_to_csv.py (ซึ่งไม่ flip)
         self.flip: bool = False
@@ -191,6 +197,54 @@ class MediaPipeExtractor:
         side = max(side, 64)  # อย่าให้กรอบเล็กเกินไป
         return (cx - side / 2, cy - side / 2, cx + side / 2, cy + side / 2)
 
+    def _search_boxes(self, w: int, h: int) -> list[tuple[int, int, int, int]]:
+        """
+        กล่องค้นหาเมื่อ tracking หลุด: ทั้งเฟรม + crop ซ้าย/กลาง/ขวา หรือ บน/กลาง/ล่าง
+        ช่วยเคสคนอยู่ชิดขอบเฟรม โดยไม่ต้องพึ่ง pose_detection.tflite
+        """
+        boxes: list[tuple[int, int, int, int]] = [(0, 0, w, h)]
+        if not self.search_when_lost:
+            return boxes
+
+        if w >= h:
+            side = h
+            xs = (0, max(0, (w - side) // 2), max(0, w - side))
+            boxes.extend((x, 0, x + side, h) for x in xs)
+        else:
+            side = w
+            ys = (0, max(0, (h - side) // 2), max(0, h - side))
+            boxes.extend((0, y, w, y + side) for y in ys)
+
+        uniq: list[tuple[int, int, int, int]] = []
+        seen = set()
+        for b in boxes:
+            if b not in seen:
+                seen.add(b)
+                uniq.append(b)
+        return uniq
+
+    def _acquire(self, rgb: np.ndarray) -> np.ndarray | None:
+        """หา ROI ใหม่จากหลาย candidate crop แล้วเลือก landmark ที่ดีที่สุด"""
+        h, w = rgb.shape[:2]
+        best_lm = None
+        best_score = -1.0
+
+        for box in self._search_boxes(w, h):
+            # หาตำแหน่งคร่าวๆ ใน candidate (ไม่ gate — คนไกล/เล็ก presence อาจต่ำ)
+            rough, _ = self._run_region(rgb, box, gate=False)
+            if rough is None:
+                continue
+            # crop รอบตัวคนจาก rough แล้วรันซ้ำแบบ gate จริง
+            lm, presence = self._run_region(rgb, self._bbox_from(rough, w, h))
+            if lm is None:
+                continue
+            score = presence + 0.15 * float(np.mean(lm[:, 3]))
+            if score > best_score:
+                best_score = score
+                best_lm = lm
+
+        return best_lm
+
     def process(self, frame_bgr: np.ndarray) -> PoseResult:
         """
         ประมวลผล 1 เฟรม -> PoseResult
@@ -209,13 +263,7 @@ class MediaPipeExtractor:
             lm, _ = self._run_region(rgb, self._roi)
         # 2) หาไม่เจอ -> หาใหม่จากทั้งเฟรม แล้ว crop รอบตัวคนรันซ้ำให้แม่น
         if lm is None:
-            # หาตำแหน่งคร่าวๆ จากทั้งเฟรม (ไม่ gate — คนตัวเล็ก presence ต่ำแต่ยังบอกตำแหน่งได้)
-            rough, _ = self._run_region(rgb, (0, 0, w, h), gate=False)
-            if rough is None:
-                self._roi = None
-                return PoseResult(keypoints=None, landmarks=None, frame=frame_bgr)
-            # crop รอบตัวคนแล้วรันซ้ำ (รอบนี้ gate จริง — กันภาพเปล่า)
-            lm, _ = self._run_region(rgb, self._bbox_from(rough, w, h))
+            lm = self._acquire(rgb)
             if lm is None:
                 self._roi = None
                 return PoseResult(keypoints=None, landmarks=None, frame=frame_bgr)

@@ -26,6 +26,13 @@ except Exception as e:  # noqa: BLE001
     VISION_IMPORT_ERROR = f"{type(e).__name__}: {e}"
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 class PosePredictor:
     """Lazily builds a single shared PoseEngine and runs predictions on frames."""
 
@@ -46,7 +53,11 @@ class PosePredictor:
                 detail=f"Vision/pose detection unavailable: {VISION_IMPORT_ERROR}",
             )
         if self._engine is None:
-            self._engine = PoseEngine()
+            self._engine = PoseEngine(
+                flip=_env_bool("ONGOR_POSE_FLIP"),
+                hold_time=float(os.getenv("ONGOR_POSE_HOLD", "0.6")),
+                conf_threshold=float(os.getenv("ONGOR_POSE_CONF", "0.85")),
+            )
         return self._engine
 
     def predict_image(self, image_bytes: bytes) -> dict[str, Any]:
@@ -99,6 +110,14 @@ def health() -> dict[str, Any]:
         "ts": time.time(),
         "vision": HAS_VISION,
         "error": VISION_IMPORT_ERROR,
+        "pose": {
+            "flip": _env_bool("ONGOR_POSE_FLIP"),
+            "hold": float(os.getenv("ONGOR_POSE_HOLD", "0.6")),
+            "conf": float(os.getenv("ONGOR_POSE_CONF", "0.85")),
+            "presence": float(os.getenv("ONGOR_POSE_PRESENCE", "0.6")),
+            "roi_margin": float(os.getenv("ONGOR_POSE_ROI_MARGIN", "0.85")),
+            "search": _env_bool("ONGOR_POSE_SEARCH", True),
+        },
     }
 
 

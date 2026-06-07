@@ -21,7 +21,8 @@ Arduino Uno Q มี **สองสมอง**:
 ส่วน Arduino sketch ฝั่ง MCU เอาไว้รับ "ผลท่าที่ทำนายได้" ไปสั่งงานฮาร์ดแวร์
 
 > 📷 Uno Q **ไม่มีกล้องในตัว** — ต้องต่อ **USB webcam** เข้าพอร์ต USB
-> 🧍 วิธีนี้ทำงานดีเมื่อ **คนยืนเต็มตัวอยู่กลางเฟรม** (จัดกล้องให้เห็นทั้งตัว)
+> 🧍 จัดกล้องให้เห็นเต็มตัวและมีแสงพอ ระบบมี two-pass crop/search ช่วยซูมหาคนเอง
+> แม้คนตัวเล็กหรือไม่อยู่กลางเฟรม แต่ถ้าออกนอกเฟรม/เห็นไม่เต็มตัว ความแม่นจะตก
 
 ---
 
@@ -191,7 +192,8 @@ void loop() {
 
 | Method | Path | ใช้ทำอะไร |
 |--------|------|-----------|
-| `GET`  | `/health` | เช็คว่าระบบ + โมเดลพร้อมไหม (`vision: true/false`, `error`) |
+| `GET`  | `/health` | เช็คว่าระบบ + โมเดลพร้อมไหม (`vision: true/false`, `error`, ค่า pose config) |
+| `GET`  | `/labels` | รายการท่าที่โมเดลรู้จัก + ชื่ออังกฤษ/ไทย |
 | `POST` | `/predict` | อัปโหลดรูป (multipart field ชื่อ `image`) → ผลทำนายท่า |
 
 **ผลลัพธ์ `/predict`:**
@@ -216,16 +218,25 @@ void loop() {
 | ลง `tflite-runtime` ไม่ได้ (ไม่มี wheel) | บอร์ดเป็น Python 3.12+ → ใช้ `ai-edge-litert` (ทาง B) แทน |
 | `numpy`/`opencv` โหลดเป็น `.tar.gz` แล้ว build นาน | Python ใหม่เกินจน ไม่มี wheel → ลด Python ด้วย `uv` (ทาง C) |
 | เปิดกล้องไม่ได้ | `v4l2-ctl --list-devices`, ลอง `--camera 1`, `sudo usermod -aG video $USER` |
-| ทำนายเพี้ยน | จัดให้เห็น **คนเต็มตัว ยืนตรง** (ระบบ crop ซูมหาคนให้เอง คนตัวเล็กกลางเฟรมก็ได้) |
-| `confirmed` เป็น null ตลอด | ปกติ — ต้องค้างท่านิ่ง >0.6 วิ และมั่นใจ >0.85 |
-| `pose_detected` เป็น false ทั้งที่มีคน | คนเล็ก/ไกลเกินไป → ขยับเข้าใกล้ให้เต็มเฟรม หรือลด threshold ใน `PoseEngine` |
+| ทำนายซ้าย/ขวาสลับ | กล้องส่งภาพ mirror → รัน API ด้วย `ONGOR_POSE_FLIP=1` |
+| ทำนายเพี้ยน | เพิ่มแสง, ให้เห็นเต็มตัว, เพิ่มคุณภาพภาพฝั่ง box ด้วย `ONGOR_JPEG=90` (default ใหม่), เช็ค Test AI ก่อนเล่น |
+| `confirmed` เป็น null ตลอด | ต้องค้างท่านิ่ง >0.6 วิ และมั่นใจ >0.85; ถ้ากล้องจริง confidence ต่ำให้ลอง `ONGOR_POSE_CONF=0.75` |
+| `pose_detected` เป็น false ทั้งที่มีคน | คนเล็ก/ไกล/มืดเกินไป หรือ threshold สูงไป → ลอง `ONGOR_POSE_PRESENCE=0.55` |
+
+ค่าจูนที่ใช้บ่อยตอนรัน API:
+```bash
+ONGOR_POSE_FLIP=1        # แก้ซ้าย/ขวาสลับ
+ONGOR_POSE_CONF=0.75     # ยืนยันท่าง่ายขึ้น (ถ้าความมั่นใจกล้องจริงต่ำ)
+ONGOR_POSE_PRESENCE=0.55 # ให้ระบบถือว่า "เจอคน" ง่ายขึ้น
+ONGOR_POSE_ROI_MARGIN=0.85
+```
 
 ---
 
 ## หมายเหตุทางเทคนิค
 - โมเดลที่ใช้คือ `pose_landmark_full.tflite` ของ MediaPipe (BlazePose) รันผ่าน tflite
-  โดยป้อนทั้งเฟรม (letterbox 256×256) แบบสเตจเดียว แล้วแปลงเป็น feature 132 มิติ
+  แบบ **two-pass crop + ROI tracking + search crop** แล้วแปลงเป็น feature 132 มิติ
   ป้อน `classifier_mp.tflite` ที่เทรนไว้ — **ไม่ต้องเทรนใหม่**
-- ทดสอบเทียบกับ `mp.solutions.pose` แล้ว: ตำแหน่ง landmark คลาดเคลื่อนเฉลี่ย ~0.009
-  (หน่วยภาพ-normalized) และ classifier ทำนาย label เดียวกัน
+- ทดสอบเทียบกับ `mp.solutions.pose` แล้ว: เคสคนตัวเล็ก/ไม่อยู่กลางเฟรม
+  ตำแหน่ง landmark คลาดเคลื่อนเฉลี่ยราว `0.002–0.009` (หน่วยภาพ-normalized)
 - ตัว extractor อยู่ที่ [`ongor/mediapipe_runner.py`](ongor/mediapipe_runner.py)
