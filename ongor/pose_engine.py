@@ -114,15 +114,23 @@ class PoseEngine:
 
     def process(self, frame_bgr: np.ndarray) -> tuple[PoseResult, Prediction | None]:
         """ประมวลผล 1 เฟรม คืนทั้ง PoseResult (มี landmarks) และ Prediction"""
+        res, predictions = self.process_topk(frame_bgr, k=1)
+        pred = predictions[0] if predictions else None
+        return res, pred
+
+    def process_topk(
+        self, frame_bgr: np.ndarray, k: int = 3
+    ) -> tuple[PoseResult, list[Prediction]]:
+        """ประมวลผลหนึ่งเฟรมและคืนผลเรียงตาม confidence โดย infer classifier ครั้งเดียว"""
         res = self.extractor.process(frame_bgr)
-        pred = (
-            self.classifier.predict(res.keypoints)
+        predictions = (
+            self.classifier.predict_topk(res.keypoints, k=k)
             if res.keypoints is not None
-            else None
+            else []
         )
         self.last_result = res
-        self.last_pred = pred
-        return res, pred
+        self.last_pred = predictions[0] if predictions else None
+        return res, predictions
 
     def predict(self, frame_bgr: np.ndarray) -> Prediction | None:
         """ทางลัด: คืนเฉพาะ Prediction (label, confidence, thai)"""

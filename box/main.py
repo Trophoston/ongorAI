@@ -13,8 +13,10 @@
 #   3. ทำถูกครบลำดับ -> +คะแนน, เพิ่มท่าใหม่ 1 ท่า, กลับข้อ 1 (ลำดับยาวขึ้น)
 #   4. ทำผิด หรือ หมดเวลา (10 วิ/ท่า) -> GAME OVER
 
-import os, glob, time, socket, struct, threading, random
+import os, glob, time, socket, struct, threading, random, queue
 from arduino.app_utils import App, Bridge
+
+from realtime import LatestFrameBuffer, LatestResultStore, RollingMetrics
 
 try: import requests
 except Exception: requests = None
@@ -28,8 +30,10 @@ CAMERA_INDEX = int(os.environ.get("ONGOR_CAM", "0"))
 CAM_W        = int(os.environ.get("ONGOR_CAM_W", "640"))
 CAM_H        = int(os.environ.get("ONGOR_CAM_H", "480"))
 CAM_FPS      = int(os.environ.get("ONGOR_CAM_FPS", "30"))
-PREDICT_FPS  = int(os.environ.get("ONGOR_FPS", "6"))
-JPEG_QUALITY = int(os.environ.get("ONGOR_JPEG", "90"))
+DISPLAY_FPS  = int(os.environ.get("ONGOR_DISPLAY_FPS", "24"))
+AI_FPS       = int(os.environ.get("ONGOR_AI_FPS", os.environ.get("ONGOR_FPS", "12")))
+AI_WIDTH     = int(os.environ.get("ONGOR_AI_WIDTH", "640"))
+JPEG_QUALITY = int(os.environ.get("ONGOR_JPEG", "78"))
 REQ_TIMEOUT  = float(os.environ.get("ONGOR_TIMEOUT", "4.0"))
 CAM_FAIL_MAX = 5
 
@@ -61,13 +65,23 @@ DEFAULT_POSES = ["hub_hand_up_Both", "hul_hand_up_L", "hur_hand_up_R", "prayHand
 # ====== STATE ======
 _lock = threading.Lock()
 _mode = 0
+_mode_epoch = 0
 _display = {"l1": "Ong-Or Ready", "l2": "Select mode", "pix": 0, "buz": 0}
 _running = True
 _cam = None
+_cam_lock = threading.RLock()
 _cam_fail = 0
 _api_ok = True
 _camchk = {"n": 0, "t": 0.0, "fps": 0.0}
 _api_en = {}              # ชื่ออังกฤษจาก /labels (fallback ของ SHORT_NAME)
+_frames = LatestFrameBuffer()
+_results = LatestResultStore()
+_metrics = RollingMetrics()
+_frame_sequence = 0
+_last_result_sequence = -1
+_last_metrics_report = 0.0
+_capture_shape = (0, 0)
+_session = requests.Session() if requests is not None else None
 
 def set_display(l1="", l2="", pix=0, buz=None):
     with _lock:
@@ -81,10 +95,15 @@ def pose_name(lbl):
 
 # ====== Bridge (คุยกับ MCU) ======
 def bridge_set_mode(mode):
-    global _mode
+    global _mode, _mode_epoch
     try: m = int(mode)
     except Exception: m = 0
-    with _lock: _mode = m
+    with _lock:
+        if m != _mode:
+            _mode_epoch += 1
+        _mode = m
+    _frames.clear()
+    _results.clear()
     print(f"[Bridge] set_mode -> {m}"); return "OK"
 def bridge_poll():
     with _lock:
@@ -175,35 +194,49 @@ def _open_camera():
 
 def get_camera():
     global _cam
-    if _cam is None: _cam = _open_camera()
-    return _cam
+    with _cam_lock:
+        if _cam is None:
+            _cam = _open_camera()
+        return _cam
 def release_camera():
     global _cam, _cam_fail
-    if _cam is not None:
-        try: _cam.release()
-        except Exception: pass
-    _cam = None; _cam_fail = 0
+    with _cam_lock:
+        if _cam is not None:
+            try: _cam.release()
+            except Exception: pass
+        _cam = None; _cam_fail = 0
 def read_frame():
-    global _cam_fail
-    cam = get_camera()
-    if cam is None: return None
-    try: ok, frame = cam.read()
-    except Exception: ok, frame = False, None
-    if not ok or frame is None:
-        _cam_fail += 1
-        if _cam_fail >= CAM_FAIL_MAX: print("[Camera] reopen"); release_camera()
-        return None
-    _cam_fail = 0; return frame
+    global _cam, _cam_fail
+    with _cam_lock:
+        if _cam is None:
+            _cam = _open_camera()
+        if _cam is None:
+            return None
+        try: ok, frame = _cam.read()
+        except Exception: ok, frame = False, None
+        if not ok or frame is None:
+            _cam_fail += 1
+            if _cam_fail >= CAM_FAIL_MAX:
+                print("[Camera] reopen")
+                release_camera()
+            return None
+        _cam_fail = 0
+        return frame
 def frame_to_jpeg(frame):
     try:
+        h, w = frame.shape[:2]
+        if AI_WIDTH > 0 and w > AI_WIDTH:
+            new_h = max(1, int(round(h * AI_WIDTH / w)))
+            frame = cv2.resize(frame, (AI_WIDTH, new_h), interpolation=cv2.INTER_AREA)
         ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
         return buf.tobytes() if ok else None
     except Exception: return None
 
 # ====== API calls ======
-def predict(jpeg):
-    r = requests.post(f"{API_BASE}/predict",
+def predict(jpeg, stream_id):
+    r = _session.post(f"{API_BASE}/predict",
                       files={"image": ("frame.jpg", jpeg, "image/jpeg")},
+                      data={"stream_id": str(stream_id)},
                       timeout=REQ_TIMEOUT)
     r.raise_for_status(); return r.json()
 
@@ -322,50 +355,155 @@ def mode_needs(m):
     if m in (1, 2): return deps_ready()
     return True
 
+def _consume_ai_result():
+    global _last_result_sequence
+    sequence, item = _results.latest()
+    if item is None or sequence <= _last_result_sequence:
+        return None
+    _last_result_sequence = sequence
+    with _lock:
+        epoch = _mode_epoch
+    if item.get("_epoch") != epoch:
+        return None
+    return item
+
 def run_cam_check():
-    f = read_frame()
-    if f is None: set_display("CAM: no frame", "reconnecting", 0, None); return
-    h, w = f.shape[:2]; _camchk["n"] += 1; now = time.time()
-    if now - _camchk["t"] >= 1.0:
-        _camchk["fps"] = _camchk["n"]/(now-_camchk["t"]); _camchk["n"]=0; _camchk["t"]=now
-    set_display(f"CAM OK {w}x{h}", f"{_camchk['fps']:.1f} fps", 8, None)
+    h, w = _capture_shape
+    snap = _metrics.snapshot()
+    fps = float(snap.get("capture_fps", 0.0) or 0.0)
+    if not w or not h:
+        set_display("CAM: no frame", "reconnecting", 0, None); return
+    set_display(f"CAM OK {w}x{h}", f"{fps:.1f} fps", 8, None)
 
 def run_test_mode():
-    f = read_frame()
-    if f is None: set_display("Camera warmup", "check cam", 0, None); return
-    jpg = frame_to_jpeg(f)
-    if jpg is None: return
-    res = predict(jpg); pred = res.get("prediction") or {}
+    res = _consume_ai_result()
+    if res is None:
+        if not _api_ok: set_display("API down", "reconnecting", 0, None)
+        return
+    pred = res.get("smoothed_prediction") or res.get("prediction") or {}
     conf = float(pred.get("confidence", 0))
     set_display(pose_name(pred.get("label")), f"Conf {int(conf*100)}%",
                 int(round(conf*8)), 0)
 
 def run_play_mode():
     now = time.time()
-    f = read_frame()
-    if f is not None:
-        jpg = frame_to_jpeg(f)
-        if jpg is not None:
-            res = predict(jpg)
-            pred = res.get("prediction") or {}
-            _game.detected = pred.get("label", "") or ""
-            confirmed = res.get("confirmed")
-            if confirmed:
-                ev = _game.on_confirm(confirmed, now)
-                if ev: set_display(_display["l1"], _display["l2"], _display["pix"],
-                                   _EVENT_BUZ.get(ev))
+    res = _consume_ai_result()
+    if res is not None:
+        pred = res.get("smoothed_prediction") or res.get("prediction") or {}
+        _game.detected = pred.get("label", "") or ""
+        confirmed = res.get("confirmed")
+        if confirmed:
+            ev = _game.on_confirm(confirmed, now)
+            if ev: set_display(_display["l1"], _display["l2"], _display["pix"],
+                               _EVENT_BUZ.get(ev))
     ev = _game.tick(now)
     if ev:
         # ตั้งเสียงก่อน render (render ใช้ buz=None จะไม่ทับ)
         with _lock: _display["buz"] = _EVENT_BUZ.get(ev, 0)
     _render_game(now)
 
-# ====== Worker ======
-def worker():
+# ====== Workers ======
+def capture_worker():
+    global _frame_sequence, _capture_shape
+    period = 1.0 / max(1, DISPLAY_FPS)
+    while _running:
+        started = time.monotonic()
+        with _lock:
+            mode, epoch = _mode, _mode_epoch
+        if mode not in (1, 2, 3):
+            time.sleep(0.05)
+            continue
+        frame = read_frame()
+        if frame is not None:
+            _frame_sequence += 1
+            _capture_shape = frame.shape[:2]
+            _metrics.mark_capture(time.monotonic())
+            if mode in (1, 2):
+                _frames.put(_frame_sequence, (epoch, frame))
+                _metrics.set_value("dropped_frames", _frames.dropped)
+        elapsed = time.monotonic() - started
+        if elapsed < period:
+            time.sleep(period - elapsed)
+
+def _report_metrics():
+    global _last_metrics_report
+    now = time.monotonic()
+    if _session is None or not API_BASE or now - _last_metrics_report < 2.0:
+        return
+    _last_metrics_report = now
+    snap = _metrics.snapshot()
+    payload = {
+        "capture_fps": snap.get("capture_fps", 0.0),
+        "ai_fps": snap.get("ai_fps", 0.0),
+        "jpeg_ms": snap.get("jpeg_ms", 0.0),
+        "request_ms": snap.get("request_ms", 0.0),
+        "dropped_frames": snap.get("dropped_frames", 0),
+    }
+    try:
+        _session.post(f"{API_BASE}/metrics/box", json=payload, timeout=1.0)
+        print("[Perf] capture={capture_fps:.1f} ai={ai_fps:.1f} "
+              "jpeg={jpeg_ms:.1f}ms request={request_ms:.1f}ms "
+              "dropped={dropped_frames}".format(**payload))
+    except Exception:
+        pass
+
+def ai_worker():
     global _api_ok
+    period = 1.0 / max(1, AI_FPS)
+    next_run = 0.0
+    while _running:
+        with _lock:
+            mode = _mode
+        if mode not in (1, 2):
+            time.sleep(0.05)
+            continue
+        wait = next_run - time.monotonic()
+        if wait > 0:
+            time.sleep(wait)
+        try:
+            sequence, payload = _frames.get(timeout=0.25)
+        except queue.Empty:
+            continue
+        epoch, frame = payload
+        with _lock:
+            if epoch != _mode_epoch or _mode not in (1, 2):
+                continue
+        if not API_BASE and resolve_api_base() is None:
+            _api_ok = False
+            time.sleep(1.0)
+            continue
+        next_run = time.monotonic() + period
+        try:
+            started = time.perf_counter()
+            jpeg = frame_to_jpeg(frame)
+            _metrics.observe("jpeg_ms", (time.perf_counter() - started) * 1000.0)
+            if jpeg is None:
+                continue
+            started = time.perf_counter()
+            result = predict(jpeg, epoch)
+            _metrics.observe("request_ms", (time.perf_counter() - started) * 1000.0)
+            _metrics.mark_ai(time.monotonic())
+            result["_epoch"] = epoch
+            _results.publish(sequence, result)
+            if not _api_ok:
+                print("[API] recovered")
+            _api_ok = True
+            _report_metrics()
+        except requests.exceptions.RequestException as e:
+            if _api_ok:
+                print("[API] unreachable:", e)
+            _api_ok = False
+            resolve_api_base()
+            time.sleep(0.5)
+        except Exception as e:
+            print("[AI]", e)
+            time.sleep(0.2)
+
+def worker():
+    global _last_result_sequence
     active = 0
     while _running:
-        period = 1.0/max(1, PREDICT_FPS)
+        period = 1.0/max(1, DISPLAY_FPS)
         with _lock: mode = _mode
         if mode != active:
             try:
@@ -396,16 +534,13 @@ def worker():
             if mode == 3: run_cam_check()
             elif mode == 2: run_test_mode()
             elif mode == 1: run_play_mode()
-            if not _api_ok: _api_ok = True; print("[API] recovered")
-        except requests.exceptions.RequestException as e:
-            if _api_ok: _api_ok = False; print("[API] unreachable:", e)
-            set_display("API down", "reconnecting", 0, None)
-            resolve_api_base(); time.sleep(1.0)
         except Exception as e:
             print("[worker]", e); set_display("Error", "see log", 0, None); time.sleep(0.5)
         dt = time.time()-t0
         if dt < period: time.sleep(period-dt)
 
 resolve_api_base()
+threading.Thread(target=capture_worker, daemon=True).start()
+threading.Thread(target=ai_worker, daemon=True).start()
 threading.Thread(target=worker, daemon=True).start()
 App.run()

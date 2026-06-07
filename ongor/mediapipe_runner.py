@@ -142,6 +142,10 @@ class MediaPipeExtractor:
         self.search_when_lost = os.getenv("ONGOR_POSE_SEARCH", "1").lower() not in (
             "0", "false", "no", "off"
         )
+        self.reacquire_interval = max(
+            1, int(os.getenv("ONGOR_POSE_REACQUIRE_INTERVAL", "3"))
+        )
+        self._lost_frames = 0
         self._roi: tuple[int, int, int, int] | None = None  # กรอบคนเฟรมก่อน (ROI tracking)
         # default False เพื่อให้ตรงกับ dataset_to_csv.py (ซึ่งไม่ flip)
         self.flip: bool = False
@@ -263,11 +267,14 @@ class MediaPipeExtractor:
             lm, _ = self._run_region(rgb, self._roi)
         # 2) หาไม่เจอ -> หาใหม่จากทั้งเฟรม แล้ว crop รอบตัวคนรันซ้ำให้แม่น
         if lm is None:
-            lm = self._acquire(rgb)
+            should_acquire = self._lost_frames % self.reacquire_interval == 0
+            lm = self._acquire(rgb) if should_acquire else None
             if lm is None:
+                self._lost_frames += 1
                 self._roi = None
                 return PoseResult(keypoints=None, landmarks=None, frame=frame_bgr)
 
+        self._lost_frames = 0
         self._roi = tuple(int(v) for v in self._bbox_from(lm, w, h))  # จำไว้ใช้เฟรมถัดไป
         kp = normalize_keypoints(lm.flatten())
         return PoseResult(keypoints=kp, landmarks=lm, frame=frame_bgr)
@@ -279,6 +286,7 @@ class MediaPipeExtractor:
     def close(self) -> None:
         self._interp = None
         self._roi = None
+        self._lost_frames = 0
 
     def __enter__(self):
         return self

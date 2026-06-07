@@ -45,14 +45,7 @@ class MediaPipeClassifier:
         return self._labels.get(idx, str(idx))
 
     def predict(self, feature: np.ndarray) -> Prediction:
-        probs = self._infer(feature)
-        idx = int(np.argmax(probs))
-        label = self._label(idx)
-        return Prediction(
-            label=label,
-            confidence=float(probs[idx]),
-            thai=THAI_NAMES.get(label, label),
-        )
+        return self.predict_topk(feature, k=1)[0]
 
     def predict_topk(self, feature: np.ndarray, k: int = 3) -> list[Prediction]:
         probs = self._infer(feature)

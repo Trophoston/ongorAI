@@ -229,7 +229,32 @@ ONGOR_POSE_FLIP=1        # แก้ซ้าย/ขวาสลับ
 ONGOR_POSE_CONF=0.75     # ยืนยันท่าง่ายขึ้น (ถ้าความมั่นใจกล้องจริงต่ำ)
 ONGOR_POSE_PRESENCE=0.55 # ให้ระบบถือว่า "เจอคน" ง่ายขึ้น
 ONGOR_POSE_ROI_MARGIN=0.85
+ONGOR_POSE_REACQUIRE_INTERVAL=3 # เว้นเฟรมก่อนค้นหาหนักซ้ำเมื่อ tracking หลุด
+ONGOR_SMOOTH_WINDOW=5     # vote หลายเฟรม ลด label กระโดด
+ONGOR_TFLITE_THREADS=4    # ใช้ CPU 4 คอร์ของ Uno Q
 ```
+
+ค่าฝั่ง Arduino App Lab:
+```bash
+ONGOR_DISPLAY_FPS=24      # กล้อง/เกมลื่น 24 FPS
+ONGOR_AI_FPS=12           # เพดาน AI; ปรับตาม inference_ms จริง
+ONGOR_AI_WIDTH=640        # ย่อเฉพาะภาพที่ส่ง AI
+ONGOR_JPEG=78             # ลดเวลา encode/network โดยยังรักษารายละเอียดท่า
+```
+
+ตรวจ performance ที่ `GET /health` ช่อง `metrics`: `capture_fps`, `ai_fps`,
+`jpeg_ms`, `request_ms`, `decode_ms`, `inference_ms`, `dropped_frames`,
+`tflite_backend` และ `tflite_threads`. เฟรมที่ drop เป็นพฤติกรรมตั้งใจเพื่อให้ AI
+ใช้เฟรมล่าสุดและไม่สะสม latency.
+
+วิเคราะห์ความแม่นจากคลิปกล้อง Uno Q:
+```bash
+python examples/diagnose_video.py unoq.mp4 \
+  --annotations annotations.csv \
+  --out logs/unoq_predictions.jsonl
+```
+ไฟล์ annotation ใช้คอลัมน์ `start_sec,end_sec,label`; script จะบันทึก top-3
+confidence ทุกเฟรมและพิมพ์ confusion matrix.
 
 ---
 

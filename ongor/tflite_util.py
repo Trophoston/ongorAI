@@ -10,24 +10,36 @@
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
+_BACKEND_NAME = "uninitialized"
+
 
 def load_interpreter(path: Path | str) -> Any:
+    global _BACKEND_NAME
     p = str(path)
+    num_threads = max(1, int(os.getenv("ONGOR_TFLITE_THREADS", "4")))
     try:
         from tflite_runtime.interpreter import Interpreter  # type: ignore
 
-        return Interpreter(model_path=p)
+        _BACKEND_NAME = "tflite-runtime"
+        return Interpreter(model_path=p, num_threads=num_threads)
     except ImportError:
         pass
     try:
         from ai_edge_litert.interpreter import Interpreter  # type: ignore
 
-        return Interpreter(model_path=p)
+        _BACKEND_NAME = "ai-edge-litert"
+        return Interpreter(model_path=p, num_threads=num_threads)
     except ImportError:
         pass
     import tensorflow as tf  # type: ignore
 
-    return tf.lite.Interpreter(model_path=p)
+    _BACKEND_NAME = "tensorflow-lite"
+    return tf.lite.Interpreter(model_path=p, num_threads=num_threads)
+
+
+def backend_name() -> str:
+    return _BACKEND_NAME
