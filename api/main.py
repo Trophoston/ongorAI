@@ -102,6 +102,19 @@ def health() -> dict[str, Any]:
     }
 
 
+@app.get("/labels")
+def labels() -> dict[str, Any]:
+    """ท่าที่โมเดลรู้จัก (ตัด idle ออก) + ชื่อแสดงผล — ให้ฝั่งเกมดึงไปสร้างโจทย์"""
+    from ongor.labels import EN_NAMES, GAME_POSES, THAI_NAMES
+
+    poses = list(GAME_POSES)
+    return {
+        "poses": poses,
+        "en": {p: EN_NAMES.get(p, p) for p in poses},
+        "thai": {p: THAI_NAMES.get(p, p) for p in poses},
+    }
+
+
 @app.post("/predict")
 async def predict(image: UploadFile = File(...)) -> dict[str, Any]:
     data = await image.read()
