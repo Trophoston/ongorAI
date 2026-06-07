@@ -3,18 +3,18 @@ BlazePose extractor — รันโมเดล MediaPipe Pose ผ่าน TFL
 โดยไม่ต้องลงแพ็กเกจ `mediapipe` (ซึ่งไม่มี wheel สำหรับ Linux aarch64 เช่นบน
 Arduino Uno Q) ต้องการแค่ tflite-runtime + opencv + numpy
 
-หลักการ: ป้อนทั้งเฟรม (letterbox เป็นจัตุรัส 256x256) เข้าโมเดล pose_landmark
-สเตจเดียว แล้วคืน 33 จุด (x,y,z,visibility) ในพิกัด "ภาพ-normalized [0,1]" ให้ตรง
-กับที่ `mp.solutions.pose` เคยให้ จากนั้น normalize_keypoints() ทำให้เป็น feature
-132 มิติเหมือนเดิม -> classifier_mp.tflite ที่เทรนไว้ใช้ได้เลยไม่ต้องเทรนใหม่
+หลักการ (2 รอบ + ROI tracking — เลียนแบบสเตจ detection ของ MediaPipe):
+  รอบ 1: ป้อนทั้งเฟรมเข้าโมเดล pose_landmark เพื่อ "หาตำแหน่งคนคร่าวๆ"
+  รอบ 2: crop รอบตัวคนแล้วรันซ้ำ -> landmark แม่นแม้คนตัวเล็ก/ไม่อยู่กลางเฟรม
+  จากนั้นจำกรอบไว้ (ROI tracking) เฟรมถัดไปรันแค่รอบเดียวบนกรอบเดิม (เร็วขึ้น)
+คืน 33 จุด (x,y,z,visibility) พิกัด "ภาพ-normalized [0,1]" ให้ตรงกับที่
+`mp.solutions.pose` เคยให้ แล้ว normalize_keypoints() ทำเป็น feature 132 มิติ
+-> classifier_mp.tflite ที่เทรนไว้ใช้ได้เลยไม่ต้องเทรนใหม่
 
 *** preprocessing/normalize ต้องตรงกับตอนสร้าง CSV (train_mediapipe.py) เป๊ะ ***
   - ไม่ flip (dataset_to_csv.py อ่านรูปตามจริง) -> default flip=False
-  - ความแม่นเทียบ mp.solutions: mean error ของ x,y ~0.009 (ภาพ-normalized)
-    และผลทำนายของ classifier ออกมา label เดียวกัน
-
-ข้อจำกัดของวิธีสเตจเดียว: ทำงานดีเมื่อ "คนยืนตรงเต็มตัวอยู่กลางเฟรม" (ซึ่งเป็น
-สภาพการใช้งานของเกมนี้อยู่แล้ว) เพราะข้ามสเตจ detection/ROI ของ MediaPipe ไป
+  - ความแม่นเทียบ mp.solutions: mean error x,y ~0.003-0.01 (ภาพ-normalized)
+    แม้คนตัวเล็ก ~25% ของเฟรม (เพราะรอบ 2 crop ซูมเข้าหาคนก่อน)
 """
 from __future__ import annotations
 
@@ -135,6 +135,8 @@ class MediaPipeExtractor:
             raise RuntimeError("โมเดลไม่มี output landmark (shape ...,195) — ไฟล์โมเดลผิดรุ่น?")
 
         self.presence_threshold = float(min_detection_confidence)
+        self.roi_margin = 0.35    # ขยายกรอบรอบตัวคนกี่ % ก่อน crop รอบสอง
+        self._roi: tuple[int, int, int, int] | None = None  # กรอบคนเฟรมก่อน (ROI tracking)
         # default False เพื่อให้ตรงกับ dataset_to_csv.py (ซึ่งไม่ flip)
         self.flip: bool = False
 
@@ -142,32 +144,83 @@ class MediaPipeExtractor:
     def _sigmoid(x: float) -> float:
         return 1.0 / (1.0 + np.exp(-x))
 
+    def _run_region(self, rgb, box, gate=True):
+        """
+        รันโมเดล landmark บน sub-region (x0,y0,x1,y1 พิกเซล) ของ rgb
+        คืน (landmarks(33,4) ในพิกัด "ภาพเต็ม-normalized [0,1]", presence) หรือ (None, presence)
+
+        gate=True  -> ถ้า presence ต่ำกว่าเกณฑ์ ถือว่าไม่เจอคน (คืน None)
+        gate=False -> คืน landmark เสมอ (ใช้ตอน "หาตำแหน่งคร่าวๆ" จากทั้งเฟรม
+                      ซึ่งคนตัวเล็ก presence จะต่ำ แต่ยังพอบอกตำแหน่งได้)
+        """
+        h, w = rgb.shape[:2]
+        x0, y0, x1, y1 = box
+        x0 = max(0, int(x0)); y0 = max(0, int(y0))
+        x1 = min(w, int(x1)); y1 = min(h, int(y1))
+        if x1 - x0 < 2 or y1 - y0 < 2:
+            return None, 0.0
+        crop = rgb[y0:y1, x0:x1]
+        inp, s, px, py = _letterbox(crop, _INPUT_SIZE)
+        self._interp.set_tensor(self._in["index"], (inp.astype(np.float32) / 255.0)[None])
+        self._interp.invoke()
+
+        presence = 1.0
+        if self._out_presence is not None:
+            presence = self._sigmoid(float(self._interp.get_tensor(self._out_presence)[0, 0]))
+            if gate and presence <= self.presence_threshold:
+                return None, presence
+
+        out = self._interp.get_tensor(self._out_landmarks)[0].reshape(39, 5)[:N_LANDMARKS]
+        lm = np.empty((N_LANDMARKS, 4), dtype=np.float32)
+        # พิกัดใน crop (256-space) -> กลับไปพิกัด "ภาพเต็ม-normalized [0,1]"
+        lm[:, 0] = ((out[:, 0] - px) / s + x0) / w        # x
+        lm[:, 1] = ((out[:, 1] - py) / s + y0) / h        # y
+        lm[:, 2] = out[:, 2] / s / w                      # z (สเกลเดียวกับ x)
+        lm[:, 3] = 1.0 / (1.0 + np.exp(-out[:, 3]))       # visibility
+        return lm, presence
+
+    def _bbox_from(self, lm, w, h):
+        """หากรอบจัตุรัสรอบตัวคนจาก landmarks (เฉพาะจุดที่เห็นชัด) + ขยาย margin"""
+        vis = lm[lm[:, 3] > 0.3][:, :2]
+        if len(vis) < 4:
+            vis = lm[:, :2]
+        xs, ys = vis[:, 0] * w, vis[:, 1] * h
+        x0, y0, x1, y1 = xs.min(), ys.min(), xs.max(), ys.max()
+        cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+        side = max(x1 - x0, y1 - y0) * (1.0 + self.roi_margin)
+        side = max(side, 64)  # อย่าให้กรอบเล็กเกินไป
+        return (cx - side / 2, cy - side / 2, cx + side / 2, cy + side / 2)
+
     def process(self, frame_bgr: np.ndarray) -> PoseResult:
-        """ประมวลผลเฟรม -> PoseResult (keypoints + landmarks ในครั้งเดียว)"""
+        """
+        ประมวลผล 1 เฟรม -> PoseResult
+        ใช้ ROI tracking: ปกติรันบนกรอบคนเฟรมก่อน (1 ครั้ง) เพื่อความเร็ว
+        ถ้าหาไม่เจอ/หลุดกรอบ ค่อย "หาใหม่" จากทั้งเฟรมแล้ว crop ซ้ำ (2 ครั้ง)
+        ทำให้แม่นแม้คนตัวเล็ก/ไม่อยู่กลางเฟรม (เทียบเท่าสเตจ detection ของ mediapipe)
+        """
         if self.flip:
             frame_bgr = cv2.flip(frame_bgr, 1)
         h, w = frame_bgr.shape[:2]
         rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-        inp, s, px, py = _letterbox(rgb, _INPUT_SIZE)
-        x = (inp.astype(np.float32) / 255.0)[None]
 
-        self._interp.set_tensor(self._in["index"], x)
-        self._interp.invoke()
-
-        # เช็คว่ามีคนไหมก่อน (กันภาพเปล่าให้ landmark มั่ว)
-        if self._out_presence is not None:
-            presence = self._sigmoid(float(self._interp.get_tensor(self._out_presence)[0, 0]))
-            if presence <= self.presence_threshold:
+        lm = None
+        # 1) ลองตามกรอบเดิมก่อน (เร็ว: รันครั้งเดียว)
+        if self._roi is not None:
+            lm, _ = self._run_region(rgb, self._roi)
+        # 2) หาไม่เจอ -> หาใหม่จากทั้งเฟรม แล้ว crop รอบตัวคนรันซ้ำให้แม่น
+        if lm is None:
+            # หาตำแหน่งคร่าวๆ จากทั้งเฟรม (ไม่ gate — คนตัวเล็ก presence ต่ำแต่ยังบอกตำแหน่งได้)
+            rough, _ = self._run_region(rgb, (0, 0, w, h), gate=False)
+            if rough is None:
+                self._roi = None
+                return PoseResult(keypoints=None, landmarks=None, frame=frame_bgr)
+            # crop รอบตัวคนแล้วรันซ้ำ (รอบนี้ gate จริง — กันภาพเปล่า)
+            lm, _ = self._run_region(rgb, self._bbox_from(rough, w, h))
+            if lm is None:
+                self._roi = None
                 return PoseResult(keypoints=None, landmarks=None, frame=frame_bgr)
 
-        out = self._interp.get_tensor(self._out_landmarks)[0].reshape(39, 5)[:N_LANDMARKS]
-        # map พิกัดจาก 256-space กลับไปเป็น "ภาพ-normalized [0,1]" ให้ตรงกับ mp.solutions
-        lm = np.empty((N_LANDMARKS, 4), dtype=np.float32)
-        lm[:, 0] = (out[:, 0] - px) / s / w           # x
-        lm[:, 1] = (out[:, 1] - py) / s / h           # y
-        lm[:, 2] = out[:, 2] / s / w                  # z (สเกลเดียวกับ x)
-        lm[:, 3] = 1.0 / (1.0 + np.exp(-out[:, 3]))   # visibility (logit -> [0,1])
-
+        self._roi = tuple(int(v) for v in self._bbox_from(lm, w, h))  # จำไว้ใช้เฟรมถัดไป
         kp = normalize_keypoints(lm.flatten())
         return PoseResult(keypoints=kp, landmarks=lm, frame=frame_bgr)
 
@@ -177,6 +230,7 @@ class MediaPipeExtractor:
 
     def close(self) -> None:
         self._interp = None
+        self._roi = None
 
     def __enter__(self):
         return self
