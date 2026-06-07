@@ -1,0 +1,22 @@
+# Python virtualenvs (ใหญ่มาก ห้ามขึ้น git — ติดตั้งใหม่จาก requirements.txt)
+.venv/
+venv/
+env/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Logs / runtime
+logs/*.jsonl
+*.log
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/

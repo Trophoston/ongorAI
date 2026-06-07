@@ -1,0 +1,15 @@
+# Pose-predict API — pinned, verified working on macOS arm64 / Python 3.9.
+# These pins matter; loosening them is what produced the [503] before:
+#   * mediapipe 0.10.30+ dropped the legacy `mp.solutions.pose` API this code uses.
+#   * mediapipe 0.10.21 needs protobuf 4.25.x; tensorflow 2.16.2 also accepts it,
+#     so the two can coexist. tensorflow 2.20 forces protobuf 6 and breaks mediapipe
+#     ("MessageFactory has no attribute GetPrototype").
+#   * numpy must stay <2.0 for these mediapipe/opencv wheels.
+numpy>=1.24,<2.0
+opencv-python>=4.8
+mediapipe==0.10.21
+tensorflow==2.16.2          # provides tf.lite.Interpreter for classifier_mp.tflite
+protobuf>=4.25.3,<5
+fastapi>=0.115
+uvicorn[standard]>=0.30
+python-multipart>=0.0.9
