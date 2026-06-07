@@ -1,0 +1,19 @@
+[Unit]
+Description=Ong-Or FastAPI Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ongor
+Group=ongor
+WorkingDirectory=/opt/ongorAI
+EnvironmentFile=/etc/default/ongor-fastapi
+ExecStart=/opt/ongorAI/.venv/bin/python -m uvicorn api.main:app --host ${ONGOR_HOST} --port ${ONGOR_PORT}
+Restart=always
+RestartSec=2
+KillSignal=SIGINT
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target
