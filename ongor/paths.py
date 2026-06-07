@@ -30,6 +30,9 @@ DATASET_DIR = PROJECT_DIR / "detaset"
 # ไฟล์ที่ใช้บ่อย
 LABEL_MAP = MODELS_DIR / "label_map.json"
 CLASSIFIER_MP_TFLITE = MODELS_DIR / "classifier_mp.tflite"
+# โมเดล BlazePose ของ MediaPipe (ดึง landmark) — ใช้ตอนรันบนบอร์ดผ่าน tflite ตรง ๆ
+# โดยไม่ต้องลงแพ็กเกจ mediapipe (ซึ่งไม่มี wheel สำหรับ Linux aarch64)
+BLAZEPOSE_LANDMARK_TFLITE = MODELS_DIR / "blazepose" / "pose_landmark_full.tflite"
 CLASSIFIER_MP_KERAS = MODELS_DIR / "classifier_mp.keras"
 KEYPOINTS_CSV = DATA_DIR / "keypoints.csv"
 SCORES_LOG = LOGS_DIR / "scores.jsonl"

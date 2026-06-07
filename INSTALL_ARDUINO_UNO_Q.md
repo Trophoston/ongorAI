@@ -2,9 +2,13 @@
 
 คู่มือนี้สอนตั้งแต่ติดตั้งจน "เขียนโค้ดเรียกใช้ท่าทาง" ได้จริง
 
+> **สำคัญ:** API นี้รันโมเดล BlazePose ผ่าน **TFLite ตรง ๆ ไม่ใช้แพ็กเกจ `mediapipe`**
+> เพราะ mediapipe ไม่มี wheel สำหรับ Linux aarch64 (เช่น Uno Q) เลยสักเวอร์ชัน
+> โมเดล `pose_landmark_full.tflite` มาพร้อม repo แล้วใน `models/blazepose/`
+
 ---
 
-## 0. เข้าใจสถาปัตยกรรม Uno Q ก่อน (สำคัญ)
+## 0. เข้าใจสถาปัตยกรรม Uno Q ก่อน
 
 Arduino Uno Q มี **สองสมอง**:
 
@@ -13,32 +17,22 @@ Arduino Uno Q มี **สองสมอง**:
 | **Linux (MPU)** | Qualcomm Dragonwing QRB2210 (Cortex-A53 4 คอร์, aarch64) | รัน Python, กล้อง, AI, API | Python / Debian Linux |
 | **MCU** | STM32U585 | ควบคุมขา I/O, มอเตอร์, เซนเซอร์แบบเรียลไทม์ | Arduino sketch (C++) |
 
-**โมเดลตรวจจับท่าทางทั้งหมดรันบนฝั่ง Linux** (Python + MediaPipe + tflite)
-ส่วน Arduino sketch ฝั่ง MCU เอาไว้รับ "ผลท่าที่ทำนายได้" ไปสั่งงานฮาร์ดแวร์ต่อ
+**โมเดลตรวจจับท่าทางรันบนฝั่ง Linux ทั้งหมด** (Python + TFLite)
+ส่วน Arduino sketch ฝั่ง MCU เอาไว้รับ "ผลท่าที่ทำนายได้" ไปสั่งงานฮาร์ดแวร์
 
-> 📷 Uno Q **ไม่มีกล้องในตัว** — ต้องต่อ **USB webcam** เข้าพอร์ต USB ของบอร์ด
+> 📷 Uno Q **ไม่มีกล้องในตัว** — ต้องต่อ **USB webcam** เข้าพอร์ต USB
+> 🧍 วิธีนี้ทำงานดีเมื่อ **คนยืนเต็มตัวอยู่กลางเฟรม** (จัดกล้องให้เห็นทั้งตัว)
 
 ---
 
 ## 1. เตรียมบอร์ด
 
-เปิดเทอร์มินัลบน Uno Q (ผ่าน Arduino App Lab หรือ SSH) แล้ว:
-
 ```bash
-# อัปเดตระบบ
 sudo apt update && sudo apt upgrade -y
+sudo apt install -y git libgl1 libglib2.0-0 libsm6 libxext6 v4l-utils
 
-# ของที่ระบบต้องมี: python venv, git, และไลบรารีของ OpenCV/กล้อง
-sudo apt install -y python3-venv python3-pip git \
-    libgl1 libglib2.0-0 libsm6 libxext6 v4l-utils
-
-# เช็คว่าเห็นกล้อง USB ไหม (ควรเห็น /dev/video0)
-v4l2-ctl --list-devices
-```
-
-ตรวจเวอร์ชัน Python (ต้อง 3.9–3.12):
-```bash
-python3 --version
+v4l2-ctl --list-devices     # เช็คว่าเห็นกล้อง USB (ควรเห็น /dev/video0)
+python3 --version           # ดูว่าบอร์ดเป็น Python เวอร์ชันอะไร
 ```
 
 ---
@@ -46,77 +40,71 @@ python3 --version
 ## 2. ดึงโค้ดลงบอร์ด
 
 ```bash
-cd ~
-git clone https://github.com/Trophoston/ongorAI.git
+cd /opt        # หรือ ~ ก็ได้
+sudo git clone https://github.com/Trophoston/ongorAI.git
+sudo chown -R $USER:$USER ongorAI     # ให้ user ปัจจุบันเป็นเจ้าของ (เลี่ยงปัญหาสิทธิ์)
 cd ongorAI
 ```
 
 ---
 
-## 3. ติดตั้ง (เวอร์ชันบอร์ด — เบา ไม่ใช้ tensorflow)
+## 3. ติดตั้ง — เลือกตามเวอร์ชัน Python ของบอร์ด
 
-บนบอร์ด ARM ที่แรม 2GB **อย่าลง tensorflow ตัวเต็ม** (ใหญ่ ~600MB+ และ build นาน)
-โค้ด `classifier_mp.py` ถูกออกแบบให้ใช้ **`tflite-runtime`** ก่อนอยู่แล้ว (เล็กมาก เร็วพอ)
+มี dependency แค่ไม่กี่ตัว และ **ทุกตัวมี wheel aarch64 สำเร็จรูป** (ไม่ต้องคอมไพล์):
+`numpy`, `opencv-python`, `fastapi`, `uvicorn`, `python-multipart` + ตัวรัน tflite
 
+ตัวรัน tflite ต่างกันตามเวอร์ชัน Python:
+
+### ทาง A — บอร์ดเป็น Python ≤ 3.11 → ใช้ `tflite-runtime` (เบาสุด แนะนำ)
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install --upgrade pip
-
-# ไลบรารีหลัก (เวอร์ชันถูกล็อกไว้เพราะเคยทำให้เกิด error 503 มาก่อน)
-pip install "numpy>=1.24,<2.0" "opencv-python>=4.8" \
-            "mediapipe==0.10.21" "protobuf>=4.25.3,<5" \
-            "fastapi>=0.115" "uvicorn[standard]>=0.30" "python-multipart>=0.0.9"
-
-# ตัวรันโมเดล .tflite แบบเบา (เลือก 1 ใน 2)
-pip install tflite-runtime        # แนะนำบนบอร์ด ARM
-# ถ้า tflite-runtime ลงไม่ได้ ค่อยใช้ตัวสำรอง:
-# pip install ai-edge-litert
+pip install numpy opencv-python fastapi "uvicorn[standard]" python-multipart tflite-runtime
 ```
 
-> **ทำไมต้องล็อกเวอร์ชันพวกนี้?** (สาเหตุของ 503 เดิม)
-> - `mediapipe` รุ่น 0.10.30 ขึ้นไป **ตัด API `mp.solutions.pose`** ที่โค้ดนี้ใช้ → ต้องใช้ **0.10.21**
-> - `mediapipe 0.10.21` ต้องการ `protobuf 4.25.x` ถ้า lib อื่นดัน protobuf เป็น 6 จะพัง (`MessageFactory ... GetPrototype`)
-> - `numpy` ต้อง `<2.0` ให้เข้ากับ wheel ของ mediapipe/opencv
-
-### ถ้า `mediapipe==0.10.21` ลงบน aarch64 ไม่ได้
-PyPI บางทีไม่มี wheel aarch64 ของ mediapipe ลองตามลำดับนี้:
+### ทาง B — บอร์ดเป็น Python 3.12 / 3.13 → ใช้ `ai-edge-litert`
+(`tflite-runtime` ยังไม่มี wheel aarch64 สำหรับ 3.12+ แต่ `ai-edge-litert` มี)
 ```bash
-# 1) ลองรุ่นใกล้เคียงที่ยังมี solutions API (ห้ามเกิน 0.10.21)
-pip install "mediapipe==0.10.18" || pip install "mediapipe==0.10.14" || pip install "mediapipe==0.10.9"
-
-# 2) ถ้ายังไม่ได้ ใช้ของ Raspberry Pi / ARM ที่ชุมชนทำไว้
-pip install mediapipe-rpi4   # หรือค้น wheel aarch64 จาก piwheels.org
+python3 -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
+pip install numpy opencv-python fastapi "uvicorn[standard]" python-multipart ai-edge-litert
 ```
+
+### ทาง C — อยากได้ Python 3.11 แต่บอร์ดมีแค่ 3.13 → ใช้ `uv` ดึง 3.11 มา
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+source $HOME/.local/bin/env
+uv venv --python 3.11 .venv
+source .venv/bin/activate
+uv pip install numpy opencv-python fastapi "uvicorn[standard]" python-multipart tflite-runtime
+```
+
+> 💡 จะใช้ `requirements.txt` แทนก็ได้ (มันเลือก tflite-runtime/ai-edge-litert ให้
+> อัตโนมัติตามเวอร์ชัน Python): `pip install -r api/requirements.txt`
 
 ---
 
 ## 4. รัน API แล้วทดสอบ
 
 ```bash
-# (อยู่ใน .venv แล้ว)
 python -m uvicorn api.main:app --host 0.0.0.0 --port 8000
 ```
 
-เปิดอีกเทอร์มินัลทดสอบ:
+อีกเทอร์มินัล:
 ```bash
-# 4.1 เช็คสุขภาพ — ต้องได้ "vision":true
-curl http://localhost:8000/health
-
-# 4.2 ทดสอบทำนายด้วยรูปนิ่ง
+curl http://localhost:8000/health                       # ต้องได้ "vision":true
 curl -F "image=@/path/to/คน.jpg" http://localhost:8000/predict
 ```
 
 ผลที่ควรได้:
 ```json
-{"prediction":{"label":"hul_hand_up_L","confidence":0.83,"thai":"ยกมือซ้าย"},
+{"prediction":{"label":"hub_hand_up_Both","confidence":0.91,"thai":"ยกมือสองข้าง"},
  "confirmed":null,"pose_detected":true}
 ```
 
-> ถ้า `"vision":false` แปลว่าไลบรารีตรวจจับยังโหลดไม่ได้ — ดูข้อความใน `"error"`
-> ของ `/health` มันจะบอกตรง ๆ ว่าติดอะไร (เช่น import mediapipe พัง)
-
-### ทดสอบกล้องสด
+ทดสอบกล้องสด:
 ```bash
 python examples/predict_webcam.py --camera 0
 ```
@@ -125,13 +113,9 @@ python examples/predict_webcam.py --camera 0
 
 ## 5. ตั้งให้รันเองตอนเปิดบอร์ด (ทางเลือก)
 
-ในโฟลเดอร์ `deploy/` มีไฟล์ systemd ให้แล้ว:
 ```bash
-# แก้ค่าในไฟล์ env ก่อน (พอร์ต, CORS ฯลฯ)
 cp deploy/ongor-fastapi.env.example /etc/default/ongor-fastapi
-sudo nano /etc/default/ongor-fastapi
-
-# ติดตั้ง service (สคริปต์อยู่ใน repo)
+sudo nano /etc/default/ongor-fastapi          # แก้พอร์ต/CORS
 sudo bash install_systemd_service.sh
 sudo systemctl enable --now ongor-fastapi
 systemctl status ongor-fastapi
@@ -141,7 +125,7 @@ systemctl status ongor-fastapi
 
 ## 6. วิธีเขียนโค้ดเรียกใช้งาน (3 แบบ)
 
-### แบบ A — เรียกตรงในไพ ธอน (เร็วสุด ไม่ผ่านเน็ต) ⭐ แนะนำบนบอร์ด
+### แบบ A — เรียกตรงในไพธอน (เร็วสุด ไม่ผ่านเน็ต) ⭐ แนะนำบนบอร์ด
 ```python
 import cv2
 from ongor.pose_engine import PoseEngine
@@ -152,20 +136,20 @@ pred = engine.predict(frame)          # -> Prediction | None
 if pred:
     print(pred.label, pred.confidence, pred.thai)
 ```
-ถ้าอยากได้แบบ "ค้างท่าไว้ถึงนับ" (กันสั่งซ้ำ เหมาะกับเล่นเกม/สั่งงาน):
+แบบ "ค้างท่าไว้ถึงนับ" (กันสั่งซ้ำ เหมาะกับเล่นเกม/สั่งงาน):
 ```python
 confirmed = engine.read_confirmed(frame)   # คืน label เฉพาะตอนเพิ่งยืนยัน
 if confirmed:
     print("ยืนยันท่า:", confirmed)
 ```
-ดูตัวอย่างเต็มที่ [`examples/predict_webcam.py`](examples/predict_webcam.py)
+ตัวอย่างเต็ม: [`examples/predict_webcam.py`](examples/predict_webcam.py)
 
 ### แบบ B — เรียกผ่าน HTTP (โค้ดอยู่คนละเครื่อง/คนละภาษา)
 ```bash
 pip install requests
 python examples/predict_http_client.py --url http://localhost:8000
 ```
-หรือจาก JavaScript / แอปอื่น:
+จาก JavaScript:
 ```js
 const fd = new FormData();
 fd.append("image", jpegBlob, "frame.jpg");
@@ -174,19 +158,21 @@ const data = await r.json();   // { prediction:{label,confidence,thai}, confirme
 ```
 
 ### แบบ C — ส่งผลไปให้ Arduino sketch (ฝั่ง MCU) สั่งฮาร์ดแวร์
-โครงสร้างทั่วไป: Python (Linux) ทำนายท่า → ส่ง label ผ่าน serial → sketch รับไปสั่ง LED/มอเตอร์
+Python (Linux) ทำนายท่า → ส่ง label ผ่าน serial → sketch รับไปสั่ง LED/มอเตอร์
 
 ฝั่ง Python:
 ```python
-import serial
+import cv2, serial
 from ongor.pose_engine import PoseEngine
-# พอร์ตเชื่อม MCU ภายในบอร์ด Uno Q (ตรวจจริงด้วย: ls /dev/ttyAMA* /dev/ttyACM*)
-mcu = serial.Serial("/dev/ttyAMA0", 115200)
+mcu = serial.Serial("/dev/ttyAMA0", 115200)   # ยืนยันพอร์ตจริง: ls /dev/ttyACM* /dev/ttyAMA*
 engine = PoseEngine()
-# ...ในลูปกล้อง...
-confirmed = engine.read_confirmed(frame)
-if confirmed:
-    mcu.write((confirmed + "\n").encode())
+cap = cv2.VideoCapture(0)
+while True:
+    ok, frame = cap.read()
+    if not ok: continue
+    confirmed = engine.read_confirmed(frame)
+    if confirmed:
+        mcu.write((confirmed + "\n").encode())
 ```
 ฝั่ง Arduino sketch (MCU):
 ```cpp
@@ -198,25 +184,27 @@ void loop() {
   }
 }
 ```
-> พอร์ต serial ที่เชื่อม Linux↔MCU ของ Uno Q ให้ยืนยันชื่อจริงในเอกสารบอร์ด/`ls /dev/tty*`
 
 ---
 
-## 7. รายการ API ทั้งหมด (ตอนนี้มีแค่ "ทำนายท่า")
+## 7. รายการ API (มีแค่ "ทำนายท่า")
 
 | Method | Path | ใช้ทำอะไร |
 |--------|------|-----------|
-| `GET`  | `/health` | เช็คว่าระบบ + ไลบรารีตรวจจับพร้อมไหม (`vision: true/false`) |
-| `POST` | `/predict` | อัปโหลดรูป (multipart field ชื่อ `image`) → คืนผลทำนายท่า |
+| `GET`  | `/health` | เช็คว่าระบบ + โมเดลพร้อมไหม (`vision: true/false`, `error`) |
+| `POST` | `/predict` | อัปโหลดรูป (multipart field ชื่อ `image`) → ผลทำนายท่า |
 
-**รูปแบบผลลัพธ์ของ `/predict`:**
+**ผลลัพธ์ `/predict`:**
 ```jsonc
 {
   "prediction": { "label": "hub_hand_up_Both", "confidence": 0.91, "thai": "ยกมือสองข้าง" },
-  "confirmed": null,        // จะเป็น label ก็ต่อเมื่อค้างท่า >0.6s และมั่นใจ >0.85
+  "confirmed": null,        // เป็น label เมื่อค้างท่า >0.6s และมั่นใจ >0.85 เท่านั้น
   "pose_detected": true     // false = ในรูปไม่เจอคน/ท่า
 }
 ```
+
+ท่าทั้งหมด (label): `Panomue`(พนมมือ), `thb/thl/thr_touch_head*`(แตะหัว), `hub/hul/hur_hand_up*`(ยกมือ),
+`tpb/tpl/tpr_t_post*`(ทีโพส), `idle`(อยู่นิ่ง)
 
 ---
 
@@ -224,16 +212,20 @@ void loop() {
 
 | อาการ | สาเหตุ / วิธีแก้ |
 |-------|------------------|
-| `/predict` ตอบ **503** | ไลบรารีตรวจจับโหลดไม่ได้ → ดู `/health` ช่อง `error`, มักเพราะ mediapipe เวอร์ชันผิด → ใช้ `0.10.21` |
-| `module 'mediapipe' has no attribute 'solutions'` | mediapipe ใหม่เกินไป → `pip install "mediapipe==0.10.21"` |
-| `MessageFactory ... GetPrototype` | protobuf ชนกัน → `pip install "protobuf>=4.25.3,<5"` |
-| เปิดกล้องไม่ได้ | เช็ค `v4l2-ctl --list-devices`, ลองเปลี่ยน `--camera 1`, ดูสิทธิ์ `sudo usermod -aG video $USER` |
-| `confirmed` เป็น null ตลอด | ปกติ — ต้อง "ค้างท่า" ให้นิ่ง >0.6 วิ และมั่นใจ >0.85 ถึงจะยืนยัน |
-| ทำนายช้า | ลด `model_complexity=0` ตอนสร้าง `PoseEngine(model_complexity=0)` |
+| `/predict` ตอบ **503** | โมเดล/ไลบรารีโหลดไม่ได้ → ดู `/health` ช่อง `error` |
+| ลง `tflite-runtime` ไม่ได้ (ไม่มี wheel) | บอร์ดเป็น Python 3.12+ → ใช้ `ai-edge-litert` (ทาง B) แทน |
+| `numpy`/`opencv` โหลดเป็น `.tar.gz` แล้ว build นาน | Python ใหม่เกินจน ไม่มี wheel → ลด Python ด้วย `uv` (ทาง C) |
+| เปิดกล้องไม่ได้ | `v4l2-ctl --list-devices`, ลอง `--camera 1`, `sudo usermod -aG video $USER` |
+| ทำนายเพี้ยน | จัดกล้องให้เห็น **คนเต็มตัว ยืนตรง อยู่กลางเฟรม** (วิธีนี้ข้ามสเตจ detection) |
+| `confirmed` เป็น null ตลอด | ปกติ — ต้องค้างท่านิ่ง >0.6 วิ และมั่นใจ >0.85 |
+| `pose_detected` เป็น false ทั้งที่มีคน | คนเล็ก/ไกลเกินไป → ขยับเข้าใกล้ให้เต็มเฟรม หรือลด threshold ใน `PoseEngine` |
 
 ---
 
-## หมายเหตุการทดสอบ
-API นี้ถูกทดสอบผ่านบน **macOS arm64 / Python 3.9** ด้วย `tensorflow 2.16.2` (แทน tflite-runtime
-ที่ลงยากบน Mac) — ผลทำนายและทุก endpoint ทำงานถูกต้อง บนบอร์ด ARM ให้ใช้ `tflite-runtime`
-ตามข้อ 3 ซึ่งเบากว่าและเป็นเส้นทางที่โค้ดเลือกใช้เป็นอันดับแรกอยู่แล้ว
+## หมายเหตุทางเทคนิค
+- โมเดลที่ใช้คือ `pose_landmark_full.tflite` ของ MediaPipe (BlazePose) รันผ่าน tflite
+  โดยป้อนทั้งเฟรม (letterbox 256×256) แบบสเตจเดียว แล้วแปลงเป็น feature 132 มิติ
+  ป้อน `classifier_mp.tflite` ที่เทรนไว้ — **ไม่ต้องเทรนใหม่**
+- ทดสอบเทียบกับ `mp.solutions.pose` แล้ว: ตำแหน่ง landmark คลาดเคลื่อนเฉลี่ย ~0.009
+  (หน่วยภาพ-normalized) และ classifier ทำนาย label เดียวกัน
+- ตัว extractor อยู่ที่ [`ongor/mediapipe_runner.py`](ongor/mediapipe_runner.py)

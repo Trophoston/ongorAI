@@ -51,11 +51,8 @@ def main() -> None:
                 print(f"  {pred.label:24s} {pred.confidence:5.2f}  {pred.thai}", end="\r")
 
             if args.show:
-                if res.landmarks is not None:
-                    from mediapipe.python.solutions import drawing_utils, pose as mp_pose
-                    drawing_utils.draw_landmarks(
-                        frame, res.landmarks, mp_pose.POSE_CONNECTIONS
-                    )
+                from ongor.mediapipe_runner import draw_landmarks
+                draw_landmarks(frame, res.landmarks)
                 txt = f"{pred.label} {pred.confidence:.2f}" if pred else "no pose"
                 cv2.putText(frame, txt, (10, 30), cv2.FONT_HERSHEY_SIMPLEX,
                             0.8, (0, 255, 0), 2)

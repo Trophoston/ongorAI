@@ -12,23 +12,9 @@ import numpy as np
 
 from .labels import THAI_NAMES, Prediction
 from .mediapipe_runner import load_label_map
+from .tflite_util import load_interpreter as _load_interpreter
 
 from .paths import CLASSIFIER_MP_TFLITE as MODEL_PATH
-
-
-def _load_interpreter(path: Path):
-    try:
-        from tflite_runtime.interpreter import Interpreter  # type: ignore
-        return Interpreter(model_path=str(path))
-    except ImportError:
-        pass
-    try:
-        from ai_edge_litert.interpreter import Interpreter  # type: ignore
-        return Interpreter(model_path=str(path))
-    except ImportError:
-        pass
-    import tensorflow as tf
-    return tf.lite.Interpreter(model_path=str(path))
 
 
 class MediaPipeClassifier:
