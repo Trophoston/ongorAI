@@ -20,7 +20,6 @@ APP_USER="ongor"
 APP_GROUP="ongor"
 WORKDIR="/opt/ongorAI"
 PYTHON_BIN="/usr/bin/python3"
-VENV_DIR="${WORKDIR}/.venv"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -37,6 +36,8 @@ while [[ $# -gt 0 ]]; do
       exit 1 ;;
   esac
 done
+
+VENV_DIR="${WORKDIR}/.venv"
 
 if [[ $EUID -ne 0 ]]; then
   echo "Please run as root (use sudo)." >&2

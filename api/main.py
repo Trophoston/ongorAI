@@ -8,16 +8,25 @@ import time
 from dataclasses import asdict
 from typing import Any
 
-import cv2
-import numpy as np
 from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from ongor.events import ArduinoSink, GameEvent, MultiSink, print_sink, score_log_sink
 from ongor.labels import LABELS
-from ongor.pose_engine import PoseEngine
 from ongor.sequence_game import SeqConfig, SequenceGame
+
+# Optional vision/pose imports (may not be available on all boards)
+HAS_VISION = False
+PoseEngine = None
+try:
+    import cv2
+    import numpy as np
+    from ongor.pose_engine import PoseEngine
+    HAS_VISION = True
+except ImportError:
+    cv2 = None  # type: ignore
+    np = None  # type: ignore
 
 
 class ConfirmBody(BaseModel):
@@ -176,12 +185,22 @@ class FastApiGameBridge:
                 self._game.stop()
 
     def _ensure_engine(self) -> PoseEngine:
+        if not HAS_VISION:
+            raise HTTPException(
+                status_code=503,
+                detail="Vision/pose detection unavailable (mediapipe not installed)",
+            )
         with self._engine_lock:
             if self._engine is None:
                 self._engine = PoseEngine()
             return self._engine
 
     def predict_image(self, image_bytes: bytes) -> dict[str, Any]:
+        if not HAS_VISION:
+            raise HTTPException(
+                status_code=503,
+                detail="Vision/pose detection unavailable (mediapipe not installed)",
+            )
         arr = np.frombuffer(image_bytes, dtype=np.uint8)
         frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
         if frame is None:
@@ -225,7 +244,7 @@ def on_startup() -> None:
 
 @app.get("/health")
 def health() -> dict[str, Any]:
-    return {"ok": True, "ts": time.time()}
+    return {"ok": True, "ts": time.time(), "vision": HAS_VISION}
 
 
 @app.get("/labels")

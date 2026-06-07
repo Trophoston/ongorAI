@@ -403,11 +403,37 @@ curl -X POST http://127.0.0.1:8000/game/start
 curl http://127.0.0.1:8000/game/state
 ```
 
-## 19) Known Constraints
+## 19) Optional Vision Feature
 
-- `/vision/predict` currently accepts image uploads, not raw WebRTC stream.
-- Backend stores recent events in memory (last 200).
-- For WAN/public use, put reverse proxy + TLS in front.
+**Important**: On some boards (e.g., Python 3.13 ARM64), mediapipe may not have pre-built wheels. The backend gracefully handles this:
+
+- **With mediapipe**: `/vision/predict` endpoint works normally
+- **Without mediapipe**: 
+  - Backend still launches and exposes game API
+  - `/vision/predict` returns HTTP 503 "Vision unavailable"
+  - Frontend must skip pose detection or implement client-side vision
+  - Game can still receive poses via manual `/game/confirm` calls
+
+**Check vision availability**:
+
+```bash
+curl http://127.0.0.1:8000/health
+```
+
+Response includes `"vision": true/false`:
+
+```json
+{
+  "ok": true,
+  "ts": 1234567890.5,
+  "vision": false
+}
+```
+
+If you need pose detection on a board without mediapipe wheels:
+1. Train model on a different Python version and copy `.keras` model to board
+2. Implement pose detection on the frontend (e.g., TensorFlow.js or client-side MediaPipe)
+3. Send confirmed poses directly to `/game/confirm`
 
 ## 20) If You Are Another AI Agent
 
@@ -415,5 +441,6 @@ If asked to extend this stack, do it in this order:
 1. Preserve current API contract unless requested breaking changes.
 2. Add tests for endpoint behavior before refactor.
 3. Keep serial optional; never hard-fail startup if serial missing.
-4. Keep event names consistent with `ongor/events.py` constants.
-5. Document any new endpoint in this file immediately.
+4. Keep vision optional; never hard-fail startup if mediapipe missing.
+5. Keep event names consistent with `ongor/events.py` constants.
+6. Document any new endpoint in this file immediately.
